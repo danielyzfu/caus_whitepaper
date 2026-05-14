@@ -7,7 +7,7 @@ output: pdf_document
 header-includes:
   - \usepackage{caption}
   - \usepackage{float}
-  - \usepackage[dvipsnames]{xcolor}
+  - \PassOptionsToPackage{dvipsnames}{xcolor}
   - \usepackage{amsmath}
   - \usepackage{enumitem}
   - \usepackage{soul}
@@ -26,6 +26,10 @@ knitr::opts_chunk$set(echo = TRUE, fig.pos = "H", out.extra = "")
 
 ## [1] Which Problem Are We Trying to Solve?
 
+Hulu is a subscription-based video streaming service that runs A/B tests to evaluate product changes such as recommendation algorithms, UI redesigns, and content curation strategies. All experiments are currently analyzed using difference-in-means (DM). The problem is that most product changes produce small lifts (1 to 3% relative to baseline), and user-level streaming behavior is highly variable, with weekly hours ranging from zero to 30+. The noise in the data regularly overwhelms the treatment signal, so experiments that produce real improvements often end up with confidence intervals that include zero. Kohavi and Thomke (2017) document that this is a common pattern across the industry: variance, not sample size or idea quality, is the binding constraint in most online experiments.
+
+We ask whether adopting CUPED (Controlled-experiment Using Pre-Experiment Data) can solve this problem. Our proof-of-concept simulation (Appendix A.2) shows that it can: with Hulu's data characteristics, the naive DM estimator fails to detect a true 0.10 hrs/week treatment effect, while CUPED with a 2-week or longer pre-experiment window detects it.
+
 ## [2] What is CUPED?
 
 ## [3] What have other companies learned from their implementation of CUPED?
@@ -34,10 +38,250 @@ knitr::opts_chunk$set(echo = TRUE, fig.pos = "H", out.extra = "")
 
 ## [5] Which recommendations do we make?
 
+We recommend replacing difference-in-means with CUPED as the default analysis method for all A/B tests on Hulu.
+
+The most important implementation choice is the pre-experiment window length. Our simulation (Appendix A.2) shows that a 2-week window reduces variance by approximately 58% for existing users, and a 4-week window reaches approximately 64%. The gains from extending the window beyond 4 weeks are small. Faire observed the same pattern and settled on 8 weeks for their marketplace, where users transact less frequently than streaming users (Ritchie & Wong, 2021). Given that our users engage with the platform on a weekly basis, a 4-week default window is a reasonable starting point.
+
+The covariate should be the same metric measured before the experiment. In our case, this means using pre-experiment weekly streaming hours to adjust post-experiment weekly streaming hours. DoorDash compared this approach against using categorical covariates like device type and market, and found that user-level behavioral data produced 10 to 20% sample size reduction while categorical data produced only 2 to 4% (Zhang & Tang, 2020). Our platform already logs per-user streaming hours, so no additional data collection is needed.
+
+About 20% of our users are new and have no pre-experiment history. Rather than dropping them from the analysis, we follow Booking.com's COALESCE approach: leave their metrics unadjusted and include them as-is (Jackson, 2018). This works because imputing the missing covariate with the sample mean makes the CUPED adjustment term equal to zero, so the unadjusted value is already the correct CUPED-adjusted value for these users. Our simulation confirms that this mixed approach still produces meaningful variance reduction at the population level.
+
+Finally, CUPED should be built into the experiment analysis pipeline rather than applied manually by individual analysts. Meta runs CUPED by default across hundreds of thousands of concurrent experiments and reports an average confidence interval reduction of over 30% (Meakin & Sangwan, 2024). Making it the default removes the risk that some teams forget to apply it and ensures that all experiments benefit from the reduced variance. In practice, this means every experiment report would show both the unadjusted and CUPED-adjusted results, so that analysts can compare them directly.
+
+Based on our simulation and industry benchmarks, we expect 40 to 60% variance reduction for existing users. Booking.com reported reaching statistical significance roughly twice as fast after adopting CUPED (Jackson, 2018). For Hulu, this means either detecting smaller effects with the same experiment duration, or reaching conclusions in half the time with the same effect size. Either way, it lets us run more experiments and iterate on product decisions faster.
+
 ---
 
 # Appendix
 
 ## [A.1] FAQs
 
-## [A.2] Additional Tables and Figures
+## [A.2] Proof-of-Concept: CUPED Simulation
+
+We simulate an A/B test on Hulu to illustrate how CUPED reduces estimator variance. The platform is testing a new recommendation algorithm, and the primary metric is weekly streaming hours per user.
+
+### Data Generating Process
+
+Each user $i$ has a stable baseline streaming rate $\mu_i \sim \text{LogNormal}(\log 7, 0.7)$, producing a right-skewed distribution with median around 7 hours per week. Weekly streaming hours are generated as:
+
+$$\text{hours}_{it} = \max\left(0,\; \mu_i + \tau \cdot W_i + \varepsilon_{it}\right)$$
+
+where $W_i \in \{0,1\}$ is the treatment indicator, $\tau = 0.10$ hours/week is the true treatment effect, and $\varepsilon_{it} \sim N(0, 5^2)$ is independent week-to-week noise. The floor at zero ensures non-negative hours. Light users with small $\mu_i$ naturally produce zero-hours weeks when noise pushes them below zero, and because the same users tend to be light across all weeks, these zeros are correlated across pre and post periods, preserving realistic pre-post correlation without any additional mechanism.
+
+We generate 50,000 users (80% existing, 20% new), 4 weeks of pre-experiment data, and 1 week of experiment data. New users have no pre-experiment observations (all pre-period columns are `NA`).
+
+```{r poc-setup, include=FALSE}
+library(tidyverse)
+```
+
+```{r poc-parameters}
+set.seed(42)
+
+N <- 50000
+new_user_frac <- 0.20
+log_mean <- log(7)
+log_sd <- 0.7
+noise_sd <- 5.0
+tau <- 0.10
+n_pre_weeks <- 4
+```
+
+```{r poc-generate}
+n_new <- round(N * new_user_frac)
+n_existing <- N - n_new
+
+users <- tibble(
+  user_id = 1:N,
+  is_new = c(rep(TRUE, n_new), rep(FALSE, n_existing)),
+  baseline_mu = rlnorm(N, meanlog = log_mean, sdlog = log_sd),
+  treatment = sample(c(0L, 1L), N, replace = TRUE)
+)
+
+generate_week <- function(baseline_mu, treatment_indicator = NULL, tau_val = 0) {
+  n <- length(baseline_mu)
+  noise <- rnorm(n, mean = 0, sd = noise_sd)
+  hours <- baseline_mu + noise
+  if (!is.null(treatment_indicator)) {
+    hours <- hours + tau_val * treatment_indicator
+  }
+  return(pmax(hours, 0))
+}
+
+pre_weeks <- map(1:n_pre_weeks, ~ generate_week(users$baseline_mu))
+names(pre_weeks) <- paste0("pre_week_", 1:n_pre_weeks)
+post_week <- generate_week(users$baseline_mu, users$treatment, tau)
+
+sim_data <- users %>%
+  bind_cols(as_tibble(pre_weeks)) %>%
+  mutate(
+    post_week = post_week,
+    pre_1wk = pre_week_4,
+    pre_2wk = (pre_week_3 + pre_week_4) / 2,
+    pre_4wk = (pre_week_1 + pre_week_2 + pre_week_3 + pre_week_4) / 4
+  ) %>%
+  mutate(
+    pre_1wk = if_else(is_new, NA_real_, pre_1wk),
+    pre_2wk = if_else(is_new, NA_real_, pre_2wk),
+    pre_4wk = if_else(is_new, NA_real_, pre_4wk)
+  )
+
+existing <- sim_data %>% filter(!is_new)
+```
+
+### Pre-Post Correlation
+
+The pre-post correlation determines how much variance CUPED can remove (theoretical variance reduction $= \rho^2$). We compare three covariate window lengths:
+
+```{r poc-correlation}
+rho_1 <- cor(existing$pre_1wk, existing$post_week)
+rho_2 <- cor(existing$pre_2wk, existing$post_week)
+rho_4 <- cor(existing$pre_4wk, existing$post_week)
+
+tibble(
+  `Pre-Experiment Window` = c("1 week", "2 weeks", "4 weeks"),
+  `Correlation (rho)` = round(c(rho_1, rho_2, rho_4), 3),
+  `Theoretical VR` = paste0(round(c(rho_1, rho_2, rho_4)^2 * 100, 1), "%")
+) %>% knitr::kable(caption = "Pre-post correlation and theoretical variance reduction by window length (existing users only).")
+```
+
+Longer windows produce higher correlation because averaging over more weeks smooths out noise, yielding a more stable estimate of each user's baseline. The improvement from 1 to 2 weeks is larger than from 2 to 4 weeks, consistent with diminishing returns reported by Faire (Ritchie & Wong, 2021).
+
+### CUPED Adjustment
+
+The CUPED-adjusted outcome is $Y_i^{cv} = Y_i - \hat{\theta}(X_i - \bar{X})$, where $\hat{\theta} = \text{Cov}(Y, X) / \text{Var}(X)$. For new users with missing $X_i$, we apply the Booking.com COALESCE approach: leave their outcome unadjusted, which is equivalent to imputing missing covariates with the sample mean (Jackson, 2018).
+
+```{r poc-cuped}
+cuped_adjust <- function(y, x) {
+  has_x <- !is.na(x)
+  theta <- cov(y[has_x], x[has_x]) / var(x[has_x])
+  x_mean <- mean(x[has_x])
+  y_adj <- y
+  y_adj[has_x] <- y[has_x] - theta * (x[has_x] - x_mean)
+  return(list(y_adj = y_adj, theta = theta))
+}
+
+run_test <- function(data, pre_col, label) {
+  y <- data$post_week
+  x <- data[[pre_col]]
+  w <- data$treatment
+
+  y_t <- y[w == 1]; y_c <- y[w == 0]
+  n_t <- length(y_t); n_c <- length(y_c)
+  naive_est <- mean(y_t) - mean(y_c)
+  naive_se <- sqrt(var(y_t) / n_t + var(y_c) / n_c)
+  naive_ci <- naive_est + c(-1, 1) * 1.96 * naive_se
+  naive_sig <- (naive_ci[1] > 0) | (naive_ci[2] < 0)
+
+  res <- cuped_adjust(y, x)
+  ya <- res$y_adj
+  ya_t <- ya[w == 1]; ya_c <- ya[w == 0]
+  cuped_est <- mean(ya_t) - mean(ya_c)
+  cuped_se <- sqrt(var(ya_t) / n_t + var(ya_c) / n_c)
+  cuped_ci <- cuped_est + c(-1, 1) * 1.96 * cuped_se
+  cuped_sig <- (cuped_ci[1] > 0) | (cuped_ci[2] < 0)
+
+  vr <- 1 - cuped_se^2 / naive_se^2
+
+  tibble(
+    Window = label,
+    `Naive Est` = round(naive_est, 4),
+    `Naive SE` = round(naive_se, 4),
+    `Naive 95% CI` = sprintf("[%.4f, %.4f]", naive_ci[1], naive_ci[2]),
+    `Naive Sig.` = ifelse(naive_sig, "Yes", "No"),
+    `CUPED Est` = round(cuped_est, 4),
+    `CUPED SE` = round(cuped_se, 4),
+    `CUPED 95% CI` = sprintf("[%.4f, %.4f]", cuped_ci[1], cuped_ci[2]),
+    `CUPED Sig.` = ifelse(cuped_sig, "Yes", "No"),
+    `Var. Reduction` = sprintf("%.1f%%", vr * 100)
+  )
+}
+```
+
+### Results: Existing Users
+
+```{r poc-results-existing}
+bind_rows(
+  run_test(existing, "pre_1wk", "1-week"),
+  run_test(existing, "pre_2wk", "2-week"),
+  run_test(existing, "pre_4wk", "4-week")
+) %>% knitr::kable(caption = "Naive vs CUPED estimator comparison (existing users, true tau = 0.10 hrs/week).")
+```
+
+The naive difference-in-means fails to detect the treatment effect across all window lengths (95% CI includes zero). CUPED with a 2-week or 4-week pre-experiment window narrows the confidence interval enough to reach statistical significance, while the point estimate remains approximately unbiased. The 1-week window provides insufficient variance reduction for detection. This pattern is consistent with Netflix's reported ~40% variance reduction for existing users (Xie & Aurisset, 2016).
+
+### Results: All Users (Including New Users)
+
+```{r poc-results-all}
+bind_rows(
+  run_test(sim_data, "pre_1wk", "1-week"),
+  run_test(sim_data, "pre_2wk", "2-week"),
+  run_test(sim_data, "pre_4wk", "4-week")
+) %>% knitr::kable(caption = "Naive vs CUPED estimator comparison (all users including new, COALESCE approach).")
+```
+
+When new users are included, the overall variance reduction is lower because the 20% of users without pre-experiment data receive no adjustment. The COALESCE approach preserves these users in the analysis rather than discarding them.
+
+### Results: New Users Only
+
+```{r poc-results-new}
+new_users <- sim_data %>% filter(is_new)
+y_t <- new_users$post_week[new_users$treatment == 1]
+y_c <- new_users$post_week[new_users$treatment == 0]
+est <- mean(y_t) - mean(y_c)
+se <- sqrt(var(y_t) / length(y_t) + var(y_c) / length(y_c))
+ci <- est + c(-1, 1) * 1.96 * se
+
+tibble(
+  Estimate = round(est, 4),
+  SE = round(se, 4),
+  `95% CI` = sprintf("[%.4f, %.4f]", ci[1], ci[2]),
+  Significant = ifelse((ci[1] > 0) | (ci[2] < 0), "Yes", "No")
+) %>% knitr::kable(caption = "New users only (no CUPED possible).")
+```
+
+For new users without pre-experiment data, CUPED cannot be applied. The standard error is roughly twice that of existing users, making it impossible to detect a small treatment effect. This confirms the Netflix finding that CUPED provides no benefit for users without historical data (Xie & Aurisset, 2016).
+
+### Confidence Interval Comparison
+
+```{r poc-ci-plot, fig.width=7, fig.height=4, fig.cap="Naive vs CUPED 95% confidence intervals for the treatment effect estimate across pre-experiment window lengths (existing users). The dashed gray line marks zero; the dotted red line marks the true treatment effect."}
+results <- bind_rows(
+  run_test(existing, "pre_1wk", "1-week"),
+  run_test(existing, "pre_2wk", "2-week"),
+  run_test(existing, "pre_4wk", "4-week")
+)
+
+plot_data <- bind_rows(
+  tibble(
+    Window = results$Window,
+    Method = "Naive",
+    Est = results$`Naive Est`,
+    CI_lo = as.numeric(str_extract(results$`Naive 95% CI`, "(?<=\\[)[\\d.-]+")),
+    CI_hi = as.numeric(str_extract(results$`Naive 95% CI`, "(?<=, )[\\d.-]+(?=\\])"))
+  ),
+  tibble(
+    Window = results$Window,
+    Method = "CUPED",
+    Est = results$`CUPED Est`,
+    CI_lo = as.numeric(str_extract(results$`CUPED 95% CI`, "(?<=\\[)[\\d.-]+")),
+    CI_hi = as.numeric(str_extract(results$`CUPED 95% CI`, "(?<=, )[\\d.-]+(?=\\])"))
+  )
+)
+
+plot_data$Window <- factor(plot_data$Window, levels = c("1-week", "2-week", "4-week"))
+plot_data$Method <- factor(plot_data$Method, levels = c("Naive", "CUPED"))
+
+ggplot(plot_data, aes(x = Window, y = Est, color = Method)) +
+  geom_pointrange(aes(ymin = CI_lo, ymax = CI_hi),
+                  position = position_dodge(width = 0.3), size = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = tau, linetype = "dotted", color = "red", alpha = 0.6) +
+  annotate("text", x = 3.4, y = tau, label = sprintf("True tau = %.2f", tau),
+           color = "red", size = 3, alpha = 0.7) +
+  scale_color_manual(values = c("Naive" = "gray50", "CUPED" = "steelblue")) +
+  labs(y = "Estimated Treatment Effect (hrs/week)",
+       x = "Pre-Experiment Window Length") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+The figure shows that CUPED consistently produces narrower confidence intervals. With a 2-week or 4-week window, the CUPED confidence interval excludes zero (statistically significant), while the naive interval does not. The point estimates remain comparable across methods, confirming that CUPED is unbiased.
