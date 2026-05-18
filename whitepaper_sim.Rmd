@@ -25,7 +25,7 @@ generate_data = function(beta, rho, sigma, n) {
   x3 = rnorm(n)
   
   w = rbinom(n, size = 1, prob = 0.5)
-  y = rho * y_pre + beta * w + rnorm(n, mean = 0, sd = sigma)
+  y = rho * y_pre + beta * w + rnorm(n, mean = 0, sd = 1)
   
   ret = data.frame(y_pre, x2, x3, y, w)
   return(ret)
@@ -91,14 +91,16 @@ estimates_long = estimates |>
     values_to = "Estimate"
   )
 
-estimates_long |>
+comparisons = estimates_long |>
   ggplot(aes(x = Estimate, color = Estimator)) +
   geom_density() +
-  geom_vline(xintercept = beta, linetype = "dashed", linewidth = 1, color = "black") +
+  geom_vline(xintercept = beta, linetype = "dashed", color = "black") +
   theme_minimal() +
   labs(
     title = "Simulated Distributions",
     x = "Estimate",
     y = "Density"
   )
+comparisons
+ggsave("comparisons.png", plot = comparisons, dpi = 600)
 ```
