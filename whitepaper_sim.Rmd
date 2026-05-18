@@ -1,0 +1,105 @@
+---
+title: "whitepaper_code"
+output: pdf_document
+date: "2026-05-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+set.seed(54321)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(tidyverse)
+```
+
+```{r Q2}
+generate_data = function(beta, rho, sigma, n) {
+  y_pre = rnorm(n, mean = 0, sd = sigma)
+  
+  # noisy covariates
+  x2 = rnorm(n)
+  x3 = rnorm(n)
+  
+  w = rbinom(n, size = 1, prob = 0.5)
+  y = rho * y_pre + beta * w + rnorm(n, mean = 0, sd = sigma)
+  
+  ret = data.frame(y_pre, x2, x3, y, w)
+  return(ret)
+}
+```
+
+
+```{r}
+diff_in_means = function(data) {
+  mean(data$y[data$w == 1]) - mean(data$y[data$w == 0])
+}
+
+cuped = function(data) {
+  theta = cov(data$y, data$y_pre) / var(data$y_pre)
+  y_cuped = data$y - theta * (data$y_pre - mean(data$y_pre))
+
+  mean(y_cuped[data$w == 1]) - mean(y_cuped[data$w == 0])
+}
+
+reg_adj = function(data) {
+  fit = lm(y ~ w + y_pre + x2 + x3, data = data)
+  
+  coef(fit)["w"]
+}
+
+fd = function(data) {
+  delta = data$y - data$y_pre
+  
+  mean(delta[data$w == 1]) - mean(delta[data$w == 0])
+}
+```
+
+```{r}
+r = 1000
+n = 20
+beta = 2
+rho = 0.9
+sigma = 5
+
+estimates = map_dfr(1:r, function(i) {
+  data = generate_data(beta, rho, sigma, n)
+
+  diff_in_means_est = diff_in_means(data)
+  cuped_est = cuped(data)
+  reg_adj_est = reg_adj(data)
+  fd_est = fd(data)
+  
+  return(data.frame(
+    CUPED = cuped_est,
+    DiM = diff_in_means_est,
+    RegAdj = reg_adj_est,
+    FirstDiff = fd_est))
+})
+
+```
+
+
+```{r}
+estimates_long = estimates |>
+  pivot_longer(
+    cols = everything(), 
+    names_to = "Estimator", 
+    values_to = "Estimate"
+  )
+
+estimates_long |>
+  ggplot(aes(x = Estimate, color = Estimator)) +
+  geom_density() +
+  geom_vline(xintercept = beta, linetype = "dashed", linewidth = 1, color = "black") +
+  # Apply styling to match the reference image
+  theme_minimal() +
+  labs(
+    title = "Simulated Distributions",
+    x = "Estimate",
+    y = "Density"
+  )
+```
