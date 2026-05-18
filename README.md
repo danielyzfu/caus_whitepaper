@@ -27,9 +27,9 @@ hours_it = max(0, mu_i + tau * W_i + noise_it)
 
 ### Why this DGP is interesting
 
-1. **Pre-post correlation emerges naturally.** Because pre and post weeks share the same `mu_i`, they're correlated without hardcoding rho. The resulting rho is ~0.70 for a 1-week window, ~0.80 for 4-week.
+1. **Pre-post correlation emerges naturally.** Because pre and post weeks share the same `mu_i`, they're correlated without hardcoding rho. The resulting rho is ~0.77 for a 1-week window, ~0.85 for 4-week.
 
-2. **Zero-floor creates non-linearity.** Light users with small `mu_i` get pushed to zero by noise. These correlated zeros mean the relationship between pre and post isn't perfectly linear, so the optimal theta is not 1. It ranges from ~0.69 (1-week window) to ~0.90 (4-week window). This makes First Differences (theta=1) and CUPED (optimal theta) genuinely different without needing artificial setup.
+2. **Zero-floor creates non-linearity.** Light users with small `mu_i` get pushed to zero by noise. These correlated zeros mean the relationship between pre and post isn't perfectly linear, so the optimal theta is not 1. It ranges from ~0.78 (1-week window) to ~0.94 (4-week window). This makes First Differences (theta=1) and CUPED (optimal theta) genuinely different without needing artificial setup.
 
 3. **New users with missing data.** 20% of users have no pre-experiment observations. We handle them with the Booking.com COALESCE approach (leave unadjusted).
 
@@ -45,8 +45,8 @@ hours_it = max(0, mu_i + tau * W_i + noise_it)
 ### Key results (existing users, 4-week window)
 
 - Naive DM: cannot detect the 0.10 effect (CI includes zero)
-- First Diff: significant, ~62% variance reduction
-- CUPED: significant, ~63% variance reduction
+- First Diff: significant at all windows, ~70% variance reduction (4-week)
+- CUPED: significant at all windows, ~72% variance reduction (4-week)
 - CUPED = OLS when using a single covariate
 
 ### Monte Carlo with this DGP

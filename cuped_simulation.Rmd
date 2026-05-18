@@ -19,16 +19,16 @@ Each user $i$ has a stable baseline streaming rate $\mu_i$ drawn from a lognorma
 
 $$\text{hours}_{it} = \max\left(0,\; \mu_i + \tau \cdot W_i + \varepsilon_{it}\right)$$
 
-where $W_i \in \{0,1\}$ is the treatment indicator, $\tau = 0.10$ hrs/week is the true treatment effect, and $\varepsilon_{it} \sim N(0, 5^2)$ is week-to-week noise. The floor at zero ensures non-negative hours. Light users naturally produce zero-hours weeks when noise pushes them below zero, and because the same users tend to be light across all weeks, these zeros are correlated across pre and post periods.
+where $W_i \in \{0,1\}$ is the treatment indicator, $\tau = 0.10$ hrs/week is the true treatment effect, and $\varepsilon_{it} \sim N(0, 4^2)$ is week-to-week noise. The floor at zero ensures non-negative hours. Light users naturally produce zero-hours weeks when noise pushes them below zero, and because the same users tend to be light across all weeks, these zeros are correlated across pre and post periods.
 
 ```{r parameters}
-set.seed(42)
+set.seed(7)
 
 N <- 50000               # total users
 new_user_frac <- 0.20    # 20% new users (no history)
 log_mean <- log(7)       # baseline median ~7 hrs/week
 log_sd <- 0.7            # right-skewed spread
-noise_sd <- 5.0          # week-to-week noise (tuned for rho ~ 0.70)
+noise_sd <- 4.0          # week-to-week noise (tuned for rho ~ 0.77)
 tau <- 0.10              # treatment effect: +0.10 hrs/week
 n_pre_weeks <- 4         # 4 weeks of pre-experiment data
 ```
@@ -38,7 +38,7 @@ n_pre_weeks <- 4         # 4 weeks of pre-experiment data
 | N | 50,000 | Mid-tier platform experiment scale |
 | New user fraction | 20% | Growing platform |
 | Baseline $\mu_i$ | LogNormal(log 7, 0.7) | Median 7 hrs/week, right-skewed to 30+ |
-| Noise $\sigma_\varepsilon$ | 5.0 | Tuned so $\rho \approx 0.70$ for 1-week window |
+| Noise $\sigma_\varepsilon$ | 4.0 | Tuned so $\rho \approx 0.77$ for 1-week window |
 | Treatment $\tau$ | 0.10 hrs/week | Small enough that naive method struggles |
 
 ## 3. Generate Users
