@@ -98,7 +98,7 @@ library(tidyverse)
 ```
 
 ```{r poc-generate, echo=FALSE}
-set.seed(132)
+set.seed(7)
 
 N <- 50000
 new_user_frac <- 0.20
@@ -298,7 +298,7 @@ ggplot(plot_data, aes(x = Window, y = Est, color = Method)) +
 
 ```{r appendix-code, eval=FALSE}
 library(tidyverse)
-set.seed(132)
+set.seed(7)
 
 # -- Parameters --
 N <- 50000
