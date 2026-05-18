@@ -21,7 +21,7 @@ hours_it = max(0, mu_i + tau * W_i + noise_it)
 ```
 
 - `mu_i` is the same across all weeks (this is what creates pre-post correlation)
-- `noise_it ~ N(0, 5^2)` is independent week-to-week noise
+- `noise_it ~ N(0, 4^2)` is independent week-to-week noise
 - `tau = 0.10` hrs/week (true treatment effect, ~1% relative lift)
 - `max(0, ...)` floors at zero (no negative streaming hours)
 
@@ -53,7 +53,7 @@ hours_it = max(0, mu_i + tau * W_i + noise_it)
 
 1000 reps, n=500 per run. Three methods naturally separate without irrelevant covariates:
 
-![Monte Carlo Sampling Distributions (Hulu DGP)](mc_hulu_dgp.png)
+![Monte Carlo Sampling Distributions (Hulu DGP)](mc_density_noise4.png)
 
 Code: `monte_carlo_our_dgp.R`
 
@@ -62,6 +62,6 @@ Code: `monte_carlo_our_dgp.R`
 - `White_Paper_Template.Rmd` - main paper (Sections 1, 2, 3, 4, 5, 7 drafted)
 - `cuped_simulation.Rmd` - standalone simulation code (runnable)
 - `monte_carlo_our_dgp.R` - Monte Carlo with Hulu DGP
-- `mc_hulu_dgp.png` - density plot from Hulu DGP Monte Carlo
+- `mc_density_noise4.png` - density plot from Hulu DGP Monte Carlo (noise_sd=4)
 - `whitepaper_sim.Rmd` - Daniel's Monte Carlo simulation
 - `comparisons.png` - density plot from Daniel's Monte Carlo
