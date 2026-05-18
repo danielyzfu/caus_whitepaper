@@ -62,7 +62,7 @@ fd = function(data) {
 r = 1000
 n = 20
 beta = 2
-rho = 0.9
+rho = 0.7
 sigma = 5
 
 estimates = map_dfr(1:r, function(i) {
