@@ -39,7 +39,29 @@ Our simulation (Section 7) and industry benchmarks suggest 40 to 60% variance re
 
 ## [3] Describe the CUPED Methodology
 
+CUPED (Controlled-experiment Using Pre-Experiment Data) was introduced by Deng et al. (2013) at Microsoft. The core idea borrows from the control variates technique in Monte Carlo simulation: if we observe a variable $X$ that is correlated with the outcome $Y$ but unaffected by the treatment, we can subtract out the predictable component of $Y$ to obtain a lower-variance estimator without introducing bias.
+
+Concretely, let $Y_i$ be the experiment-period outcome for user $i$, $X_i$ be a pre-experiment covariate (typically the same metric measured before the experiment started), and $W_i \in \{0,1\}$ be the treatment indicator. The CUPED-adjusted outcome is:
+
+$$Y_i^{cv} = Y_i - \hat{\theta}(X_i - \bar{X})$$
+
+where $\hat{\theta} = \text{Cov}(Y, X) / \text{Var}(X)$ is estimated from the data. The subtracted term $\hat{\theta}(X_i - \bar{X})$ removes the portion of $Y_i$ that is predictable from the pre-experiment covariate. Because treatment is randomly assigned and therefore independent of $X$, this adjustment does not change the expected value of the treatment effect estimator. The treatment effect is then estimated as the difference in means of $Y^{cv}$ between treatment and control groups, just as in the standard approach.
+
+The variance of the adjusted estimator is reduced by a factor of $1 - \rho^2$, where $\rho = \text{Cor}(Y, X)$. A correlation of $\rho = 0.7$ yields about 50% variance reduction; $\rho = 0.8$ yields about 64%. This means the pre-post correlation is the single most important quantity determining whether CUPED is worthwhile for a given metric. Metrics with stable user-level behavior across time (such as streaming hours, purchase frequency, or session count) tend to have high $\rho$ and benefit most. Metrics that are inherently volatile or one-time in nature benefit less.
+
+CUPED is applied after the experiment is complete, using only data that was observed before randomization. This makes it compatible with any randomization scheme and easy to add to an existing analysis pipeline without changing how experiments are designed or run.
+
 ## [4] Compare CUPED to Other Methodologies
+
+The standard approach to analyzing an A/B test is difference-in-means (DM): compute the average outcome in the treatment group, subtract the average in the control group, and construct a confidence interval using the pooled standard error. DM is unbiased under random assignment, but it ignores all pre-experiment information, so its variance reflects the full heterogeneity in user-level outcomes. When the metric is noisy (as streaming hours are), DM often fails to detect small but real treatment effects.
+
+First differences is the simplest way to incorporate pre-experiment data. For each user, compute $\Delta_i = Y_{i,post} - X_{i,pre}$, then take the difference in means of $\Delta$ between treatment and control. This is algebraically equivalent to CUPED with $\theta$ forced to 1. When the pre and post metrics are measured in the same units and have similar variance, $\theta$ is close to 1 and first differences performs nearly as well as CUPED. But when the relationship between pre and post is not one-to-one (for example, when the pre-experiment covariate is an average over multiple weeks, or when the outcome distribution has a floor at zero), the optimal $\theta$ deviates from 1 and first differences leaves variance on the table. In our simulation, $\hat{\theta}$ ranges from 0.69 (1-week window) to 0.90 (4-week window), and the gap in variance reduction between first differences and CUPED is largest at short windows.
+
+OLS regression adjustment fits $Y_i = \alpha + \beta W_i + \gamma X_i + \varepsilon_i$ and reads the treatment effect from $\hat{\beta}$. With a single covariate, this produces exactly the same estimate and standard error as CUPED, because the OLS coefficient $\hat{\gamma}$ equals CUPED's $\hat{\theta}$. The equivalence breaks when multiple covariates are included: OLS generalizes naturally to a vector of regressors, while single-covariate CUPED does not. Deng et al. (2022) at Airbnb formalized this multi-covariate extension as CUPAC, showing that variance reduction equals $R^2$ from regressing the outcome on the full covariate vector.
+
+Difference-in-differences (DiD) is designed for settings where treatment and control groups may have different pre-existing trends, such as when randomization is at the market or region level rather than the user level. DiD computes the change in the treatment group's mean minus the change in the control group's mean, under the parallel trends assumption. In a standard user-level A/B test with proper randomization, the parallel trends assumption is satisfied by construction and DiD reduces to first differences. DiD is therefore most useful in quasi-experimental settings where randomization is imperfect or unavailable, rather than in the fully randomized experiments that CUPED is designed for.
+
+The choice among these methods depends on the experimental setting. For a properly randomized user-level A/B test like the ones Hulu runs, CUPED (or equivalently, OLS with a single pre-experiment covariate) is the most practical option: it extracts the maximum variance reduction from the available pre-experiment data, requires no changes to the randomization procedure, and is straightforward to implement. First differences is a reasonable default when the analyst does not want to estimate $\theta$, but it will underperform CUPED when $\theta$ differs from 1. DM should be reserved for cases where no pre-experiment data is available.
 
 ## [5] Report on CUPED Adoption Elsewhere
 
@@ -67,7 +89,7 @@ Each user $i$ has a stable baseline streaming rate $\mu_i \sim \text{LogNormal}(
 
 $$\text{hours}_{it} = \max\left(0,\; \mu_i + \tau \cdot W_i + \varepsilon_{it}\right)$$
 
-where $W_i \in \{0,1\}$ is the treatment indicator, $\tau = 0.10$ hours/week is the true treatment effect, and $\varepsilon_{it} \sim N(0, 5^2)$ is independent week-to-week noise. The floor at zero ensures non-negative hours. Light users with small $\mu_i$ naturally produce zero-hours weeks when noise pushes them below zero, and because the same users tend to be light across all weeks, these zeros are correlated across pre and post periods, preserving realistic pre-post correlation without any additional mechanism.
+where $W_i \in \{0,1\}$ is the treatment indicator, $\tau = 0.10$ hours/week is the true treatment effect, and $\varepsilon_{it} \sim N(0, 4^2)$ is independent week-to-week noise. The floor at zero ensures non-negative hours. Light users with small $\mu_i$ naturally produce zero-hours weeks when noise pushes them below zero, and because the same users tend to be light across all weeks, these zeros are correlated across pre and post periods, preserving realistic pre-post correlation without any additional mechanism.
 
 We generate 50,000 users (80% existing, 20% new), 4 weeks of pre-experiment data, and 1 week of experiment data. New users have no pre-experiment observations.
 
@@ -76,13 +98,13 @@ library(tidyverse)
 ```
 
 ```{r poc-generate, echo=FALSE}
-set.seed(42)
+set.seed(132)
 
 N <- 50000
 new_user_frac <- 0.20
 log_mean <- log(7)
 log_sd <- 0.7
-noise_sd <- 5.0
+noise_sd <- 4.0
 tau <- 0.10
 n_pre_weeks <- 4
 
@@ -235,8 +257,9 @@ Naive DM fails to detect the 0.10 hrs/week treatment effect at any window length
 
 \FloatBarrier
 
-```{r poc-ci-plot, echo=FALSE, fig.width=5.5, fig.height=3.5, fig.align="center"}
+```{r poc-ci-plot, echo=FALSE, fig.width=6, fig.height=4, fig.align="center"}
 plot_data <- all_results %>%
+  filter(Method %in% c("Naive DM", "First Diff.", "CUPED")) %>%
   mutate(
     CI_lo = as.numeric(str_extract(`95% CI`, "(?<=\\[)[\\d.-]+")),
     CI_hi = as.numeric(str_extract(`95% CI`, "(?<=, )[\\d.-]+(?=\\])"))
@@ -244,24 +267,28 @@ plot_data <- all_results %>%
   rename(Est = Estimate)
 
 plot_data$Window <- factor(plot_data$Window, levels = c("1-week", "2-week", "4-week"))
-plot_data$Method <- factor(plot_data$Method, levels = c("Naive DM", "First Diff.", "CUPED", "OLS Reg. Adj."))
+plot_data$Method <- factor(plot_data$Method, levels = c("Naive DM", "First Diff.", "CUPED"))
 
 ggplot(plot_data, aes(x = Window, y = Est, color = Method)) +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = -0.005, ymax = 0.005,
+           fill = "gray90", alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  geom_hline(yintercept = tau, linetype = "dotted", color = "red", alpha = 0.7) +
   geom_pointrange(aes(ymin = CI_lo, ymax = CI_hi),
-                  position = position_dodge(width = 0.5), size = 0.5) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
-  geom_hline(yintercept = tau, linetype = "dotted", color = "red", alpha = 0.6) +
-  annotate("text", x = 2.8, y = tau + 0.02, label = sprintf("True tau = %.2f", tau),
-           color = "red", size = 2.5) +
-  scale_color_manual(values = c("Naive DM" = "gray50", "First Diff." = "orange3",
-                                "CUPED" = "steelblue", "OLS Reg. Adj." = "darkgreen")) +
+                  position = position_dodge(width = 0.4), size = 0.7, linewidth = 0.9) +
+  annotate("text", x = 0.6, y = tau + 0.015, label = paste0("True effect = ", tau),
+           color = "red", size = 2.8, hjust = 0) +
+  annotate("text", x = 0.6, y = -0.015, label = "zero",
+           color = "gray40", size = 2.5, hjust = 0) +
+  scale_color_manual(values = c("Naive DM" = "gray50", "First Diff." = "orange3", "CUPED" = "steelblue")) +
   labs(y = "Estimated Treatment Effect (hrs/week)",
        x = "Pre-Experiment Window Length") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom",
+        panel.grid.minor = element_blank())
 ```
 
-*Figure 1: 95% confidence intervals by method and window length (existing users). Dashed gray line: zero. Dotted red line: true effect. CUPED and OLS overlap exactly.*
+*Figure 1: 95% confidence intervals by method and window length (existing users). OLS Reg. Adj. omitted (identical to CUPED with single covariate).*
 
 ---
 
@@ -271,14 +298,14 @@ ggplot(plot_data, aes(x = Window, y = Est, color = Method)) +
 
 ```{r appendix-code, eval=FALSE}
 library(tidyverse)
-set.seed(42)
+set.seed(132)
 
 # -- Parameters --
 N <- 50000
 new_user_frac <- 0.20
 log_mean <- log(7)
 log_sd <- 0.7
-noise_sd <- 5.0
+noise_sd <- 4.0
 tau <- 0.10
 n_pre_weeks <- 4
 
