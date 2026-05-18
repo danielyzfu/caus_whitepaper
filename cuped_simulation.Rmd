@@ -1,0 +1,299 @@
+---
+title: "CUPED Simulation: Hulu A/B Test"
+author: "ECMA 31370 White Paper"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+```
+
+## 1. Overview
+
+We simulate an A/B test on Hulu testing a new recommendation algorithm. The primary metric is weekly streaming hours per user. The goal is to compare four estimators for the treatment effect and demonstrate how CUPED reduces variance.
+
+## 2. Data Generating Process
+
+Each user $i$ has a stable baseline streaming rate $\mu_i$ drawn from a lognormal distribution. Weekly streaming hours are:
+
+$$\text{hours}_{it} = \max\left(0,\; \mu_i + \tau \cdot W_i + \varepsilon_{it}\right)$$
+
+where $W_i \in \{0,1\}$ is the treatment indicator, $\tau = 0.10$ hrs/week is the true treatment effect, and $\varepsilon_{it} \sim N(0, 5^2)$ is week-to-week noise. The floor at zero ensures non-negative hours. Light users naturally produce zero-hours weeks when noise pushes them below zero, and because the same users tend to be light across all weeks, these zeros are correlated across pre and post periods.
+
+```{r parameters}
+set.seed(42)
+
+N <- 50000               # total users
+new_user_frac <- 0.20    # 20% new users (no history)
+log_mean <- log(7)       # baseline median ~7 hrs/week
+log_sd <- 0.7            # right-skewed spread
+noise_sd <- 5.0          # week-to-week noise (tuned for rho ~ 0.70)
+tau <- 0.10              # treatment effect: +0.10 hrs/week
+n_pre_weeks <- 4         # 4 weeks of pre-experiment data
+```
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| N | 50,000 | Mid-tier platform experiment scale |
+| New user fraction | 20% | Growing platform |
+| Baseline $\mu_i$ | LogNormal(log 7, 0.7) | Median 7 hrs/week, right-skewed to 30+ |
+| Noise $\sigma_\varepsilon$ | 5.0 | Tuned so $\rho \approx 0.70$ for 1-week window |
+| Treatment $\tau$ | 0.10 hrs/week | Small enough that naive method struggles |
+
+## 3. Generate Users
+
+```{r generate-users}
+n_new <- round(N * new_user_frac)
+n_existing <- N - n_new
+
+users <- tibble(
+  user_id = 1:N,
+  is_new = c(rep(TRUE, n_new), rep(FALSE, n_existing)),
+  baseline_mu = rlnorm(N, meanlog = log_mean, sdlog = log_sd),
+  treatment = sample(c(0L, 1L), N, replace = TRUE)
+)
+
+cat(sprintf("Treatment: %d | Control: %d\n",
+            sum(users$treatment == 1), sum(users$treatment == 0)))
+cat(sprintf("New: %d | Existing: %d\n", n_new, n_existing))
+```
+
+## 4. Generate Weekly Streaming Hours
+
+```{r generate-weeks}
+generate_week <- function(baseline_mu, treatment_indicator = NULL, tau_val = 0) {
+  n <- length(baseline_mu)
+  noise <- rnorm(n, mean = 0, sd = noise_sd)
+  hours <- baseline_mu + noise
+  if (!is.null(treatment_indicator)) {
+    hours <- hours + tau_val * treatment_indicator
+  }
+  return(pmax(hours, 0))
+}
+
+pre_weeks <- map(1:n_pre_weeks, ~ generate_week(users$baseline_mu))
+names(pre_weeks) <- paste0("pre_week_", 1:n_pre_weeks)
+
+post_week <- generate_week(users$baseline_mu, users$treatment, tau)
+```
+
+## 5. Assemble Dataset
+
+Three pre-experiment covariates at different window lengths. New users get `NA`.
+
+```{r assemble}
+sim_data <- users %>%
+  bind_cols(as_tibble(pre_weeks)) %>%
+  mutate(
+    post_week = post_week,
+    pre_1wk = pre_week_4,
+    pre_2wk = (pre_week_3 + pre_week_4) / 2,
+    pre_4wk = (pre_week_1 + pre_week_2 + pre_week_3 + pre_week_4) / 4
+  ) %>%
+  mutate(
+    pre_1wk = if_else(is_new, NA_real_, pre_1wk),
+    pre_2wk = if_else(is_new, NA_real_, pre_2wk),
+    pre_4wk = if_else(is_new, NA_real_, pre_4wk)
+  )
+
+head(sim_data %>% select(user_id, is_new, treatment, pre_1wk, pre_4wk, post_week), 10)
+```
+
+## 6. Explore the Data
+
+### 6.1 Distribution of Streaming Hours
+
+```{r dist-plot, fig.width=8, fig.height=4}
+ggplot(sim_data, aes(x = post_week)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "white", alpha = 0.8) +
+  labs(title = "Distribution of Weekly Streaming Hours (Experiment Period)",
+       x = "Streaming Hours / Week", y = "Count") +
+  theme_minimal()
+```
+
+```{r dist-summary}
+cat(sprintf("Mean:   %.2f hrs/week\n", mean(sim_data$post_week)))
+cat(sprintf("Median: %.2f hrs/week\n", median(sim_data$post_week)))
+cat(sprintf("SD:     %.2f\n", sd(sim_data$post_week)))
+cat(sprintf("Zero-hours users: %.1f%%\n", mean(sim_data$post_week == 0) * 100))
+```
+
+### 6.2 Pre-Post Correlation
+
+```{r pre-post-corr}
+existing <- sim_data %>% filter(!is_new)
+
+rho_1 <- cor(existing$pre_1wk, existing$post_week)
+rho_2 <- cor(existing$pre_2wk, existing$post_week)
+rho_4 <- cor(existing$pre_4wk, existing$post_week)
+
+tibble(
+  Window = c("1 week", "2 weeks", "4 weeks"),
+  rho = round(c(rho_1, rho_2, rho_4), 3),
+  `Theoretical VR` = paste0(round(c(rho_1, rho_2, rho_4)^2 * 100, 1), "%")
+) %>% knitr::kable()
+```
+
+### 6.3 Pre vs Post Scatter Plot
+
+```{r scatter, fig.width=8, fig.height=4}
+existing %>%
+  sample_n(5000) %>%
+  ggplot(aes(x = pre_4wk, y = post_week)) +
+  geom_point(alpha = 0.15, size = 0.8, color = "steelblue") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 0.8) +
+  labs(title = sprintf("Pre vs Post Streaming Hours (4-week window, rho = %.3f)", rho_4),
+       x = "Pre-Experiment (4-week avg, hrs/week)",
+       y = "Experiment Period (hrs/week)") +
+  theme_minimal()
+```
+
+## 7. CUPED Implementation
+
+$$Y_i^{cv} = Y_i - \hat{\theta}(X_i - \bar{X})$$
+
+where $\hat{\theta} = \text{Cov}(Y, X) / \text{Var}(X)$. For users with missing $X_i$ (new users), we apply the Booking.com COALESCE approach: leave their metric unadjusted.
+
+```{r cuped-function}
+cuped_adjust <- function(y, x) {
+  has_x <- !is.na(x)
+  theta <- cov(y[has_x], x[has_x]) / var(x[has_x])
+  x_mean <- mean(x[has_x])
+  y_adj <- y
+  y_adj[has_x] <- y[has_x] - theta * (x[has_x] - x_mean)
+  return(list(y_adj = y_adj, theta = theta))
+}
+```
+
+## 8. Four-Method Comparison
+
+We compare: Naive DM, First Differences ($\theta = 1$), CUPED (optimal $\hat{\theta}$), and OLS Regression Adjustment.
+
+```{r run-test-all}
+run_test_all <- function(data, pre_col, label) {
+  y <- data$post_week
+  x <- data[[pre_col]]
+  w <- data$treatment
+  has_x <- !is.na(x)
+
+  y_t <- y[w == 1]; y_c <- y[w == 0]
+  n_t <- length(y_t); n_c <- length(y_c)
+
+  # Naive DM
+  naive_est <- mean(y_t) - mean(y_c)
+  naive_se <- sqrt(var(y_t) / n_t + var(y_c) / n_c)
+  naive_ci <- naive_est + c(-1, 1) * 1.96 * naive_se
+
+  # First Differences (theta = 1)
+  fd <- y; fd[has_x] <- y[has_x] - x[has_x]
+  fd_t <- fd[w == 1]; fd_c <- fd[w == 0]
+  fd_est <- mean(fd_t) - mean(fd_c)
+  fd_se <- sqrt(var(fd_t) / n_t + var(fd_c) / n_c)
+  fd_ci <- fd_est + c(-1, 1) * 1.96 * fd_se
+
+  # CUPED (optimal theta)
+  res <- cuped_adjust(y, x)
+  ya <- res$y_adj
+  ya_t <- ya[w == 1]; ya_c <- ya[w == 0]
+  cuped_est <- mean(ya_t) - mean(ya_c)
+  cuped_se <- sqrt(var(ya_t) / n_t + var(ya_c) / n_c)
+  cuped_ci <- cuped_est + c(-1, 1) * 1.96 * cuped_se
+
+  # OLS Regression Adjustment
+  df_ols <- tibble(y = y, w = w, x = x) %>% filter(!is.na(x))
+  mod <- lm(y ~ w + x, data = df_ols)
+  ols_est <- coef(mod)["w"]
+  ols_se <- summary(mod)$coefficients["w", "Std. Error"]
+  ols_ci <- ols_est + c(-1, 1) * 1.96 * ols_se
+
+  sig <- function(ci) ifelse((ci[1] > 0) | (ci[2] < 0), "Yes", "No")
+
+  tibble(
+    Window = label,
+    Method = c("Naive DM", "First Diff.", "CUPED", "OLS Reg. Adj."),
+    Estimate = round(c(naive_est, fd_est, cuped_est, ols_est), 4),
+    SE = round(c(naive_se, fd_se, cuped_se, ols_se), 4),
+    `95% CI` = c(sprintf("[%.4f, %.4f]", naive_ci[1], naive_ci[2]),
+                 sprintf("[%.4f, %.4f]", fd_ci[1], fd_ci[2]),
+                 sprintf("[%.4f, %.4f]", cuped_ci[1], cuped_ci[2]),
+                 sprintf("[%.4f, %.4f]", ols_ci[1], ols_ci[2])),
+    Sig. = c(sig(naive_ci), sig(fd_ci), sig(cuped_ci), sig(ols_ci)),
+    `Var. Red.` = sprintf("%.1f%%", c(0,
+                   (1 - fd_se^2 / naive_se^2) * 100,
+                   (1 - cuped_se^2 / naive_se^2) * 100,
+                   (1 - ols_se^2 / naive_se^2) * 100))
+  )
+}
+```
+
+### 8.1 Existing Users
+
+```{r results-existing}
+all_results <- bind_rows(
+  run_test_all(existing, "pre_1wk", "1-week"),
+  run_test_all(existing, "pre_2wk", "2-week"),
+  run_test_all(existing, "pre_4wk", "4-week")
+)
+
+all_results %>% knitr::kable()
+```
+
+### 8.2 All Users (COALESCE approach)
+
+```{r results-all}
+bind_rows(
+  run_test_all(sim_data, "pre_1wk", "1-week"),
+  run_test_all(sim_data, "pre_2wk", "2-week"),
+  run_test_all(sim_data, "pre_4wk", "4-week")
+) %>% knitr::kable()
+```
+
+### 8.3 New Users Only
+
+```{r results-new}
+new_users <- sim_data %>% filter(is_new)
+y_t <- new_users$post_week[new_users$treatment == 1]
+y_c <- new_users$post_week[new_users$treatment == 0]
+est <- mean(y_t) - mean(y_c)
+se <- sqrt(var(y_t) / length(y_t) + var(y_c) / length(y_c))
+ci <- est + c(-1, 1) * 1.96 * se
+
+tibble(
+  Estimate = est,
+  SE = se,
+  `95% CI` = sprintf("[%.4f, %.4f]", ci[1], ci[2]),
+  Significant = ifelse((ci[1] > 0) | (ci[2] < 0), "Yes", "No")
+) %>% knitr::kable()
+```
+
+No CUPED adjustment is possible for new users. The SE is roughly 2x that of existing users.
+
+## 9. Confidence Interval Comparison
+
+```{r ci-plot, fig.width=8, fig.height=5}
+plot_data <- all_results %>%
+  mutate(
+    CI_lo = as.numeric(str_extract(`95% CI`, "(?<=\\[)[\\d.-]+")),
+    CI_hi = as.numeric(str_extract(`95% CI`, "(?<=, )[\\d.-]+(?=\\])"))
+  ) %>%
+  rename(Est = Estimate)
+
+plot_data$Window <- factor(plot_data$Window, levels = c("1-week", "2-week", "4-week"))
+plot_data$Method <- factor(plot_data$Method, levels = c("Naive DM", "First Diff.", "CUPED", "OLS Reg. Adj."))
+
+ggplot(plot_data, aes(x = Window, y = Est, color = Method)) +
+  geom_pointrange(aes(ymin = CI_lo, ymax = CI_hi),
+                  position = position_dodge(width = 0.5), size = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = tau, linetype = "dotted", color = "red", alpha = 0.6) +
+  annotate("text", x = 2.8, y = tau + 0.02, label = sprintf("True tau = %.2f", tau),
+           color = "red", size = 3) +
+  scale_color_manual(values = c("Naive DM" = "gray50", "First Diff." = "orange3",
+                                "CUPED" = "steelblue", "OLS Reg. Adj." = "darkgreen")) +
+  labs(title = "Four-Method Comparison: 95% Confidence Intervals (Existing Users)",
+       y = "Estimated Treatment Effect (hrs/week)",
+       x = "Pre-Experiment Window Length") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
