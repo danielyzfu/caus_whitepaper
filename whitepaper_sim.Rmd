@@ -95,7 +95,6 @@ estimates_long |>
   ggplot(aes(x = Estimate, color = Estimator)) +
   geom_density() +
   geom_vline(xintercept = beta, linetype = "dashed", linewidth = 1, color = "black") +
-  # Apply styling to match the reference image
   theme_minimal() +
   labs(
     title = "Simulated Distributions",
