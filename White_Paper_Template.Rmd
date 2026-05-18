@@ -436,17 +436,16 @@ tibble(
 
 # Table B1: SE and Variance Reduction
 all_results_app %>%
+  filter(Method != "OLS Reg. Adj.") %>%
   select(Window, Method, SE, `Var. Red.`) %>%
   pivot_wider(names_from = Method, values_from = c(SE, `Var. Red.`)) %>%
   select(Window,
          `Naive SE` = `SE_Naive DM`,
          `FD SE` = `SE_First Diff.`,
          `CUPED SE` = `SE_CUPED`,
-         `OLS SE` = `SE_OLS Reg. Adj.`,
          `FD VR` = `Var. Red._First Diff.`,
-         `CUPED VR` = `Var. Red._CUPED`,
-         `OLS VR` = `Var. Red._OLS Reg. Adj.`) %>%
-  knitr::kable(caption = "Table B1: Standard errors and variance reduction by method (existing users, true tau = 0.10).")
+         `CUPED VR` = `Var. Red._CUPED`) %>%
+  knitr::kable(caption = "Table B1: Standard errors and variance reduction by method (existing users, true tau = 0.10). OLS Reg. Adj. omitted (identical to CUPED).")
 
 # Table B2: Estimates and CIs
 all_results_app %>%
@@ -454,5 +453,5 @@ all_results_app %>%
   mutate(Result = sprintf("%.3f %s %s", Estimate, `95% CI`, ifelse(Sig. == "Yes", "*", ""))) %>%
   select(Window, Method, Result) %>%
   pivot_wider(names_from = Method, values_from = Result) %>%
-  knitr::kable(caption = "Table B2: Estimates and 95% CIs (existing users). * = significant at 5%. OLS identical to CUPED, omitted.")
+  knitr::kable(caption = "Table B2: Estimates and 95% CIs (existing users). * = significant at 5%.")
 ```
