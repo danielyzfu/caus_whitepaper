@@ -49,13 +49,19 @@ hours_it = max(0, mu_i + tau * W_i + noise_it)
 - CUPED: significant, ~63% variance reduction
 - CUPED = OLS when using a single covariate
 
-### For Monte Carlo simulations
+### Monte Carlo with this DGP
 
-If you want to run repeated sampling with this DGP, the `generate_week()` function in `cuped_simulation.Rmd` can be called in a loop. The DGP naturally produces method differences (Naive vs First Diff vs CUPED) without needing to add irrelevant covariates.
+1000 reps, n=500 per run. Three methods naturally separate without irrelevant covariates:
+
+![Monte Carlo Sampling Distributions (Hulu DGP)](mc_hulu_dgp.png)
+
+Code: `monte_carlo_our_dgp.R`
 
 ## File structure
 
-- `White_Paper_Template.Rmd` - main paper (Sections 1, 2, 5, 7 drafted)
+- `White_Paper_Template.Rmd` - main paper (Sections 1, 2, 3, 4, 5, 7 drafted)
 - `cuped_simulation.Rmd` - standalone simulation code (runnable)
-- `whitepaper_sim.Rmd` - Monte Carlo comparison simulation
-- `comparisons.png` - density plot from Monte Carlo
+- `monte_carlo_our_dgp.R` - Monte Carlo with Hulu DGP
+- `mc_hulu_dgp.png` - density plot from Hulu DGP Monte Carlo
+- `whitepaper_sim.Rmd` - Daniel's Monte Carlo simulation
+- `comparisons.png` - density plot from Daniel's Monte Carlo
