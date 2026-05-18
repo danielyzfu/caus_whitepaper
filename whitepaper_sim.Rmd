@@ -104,3 +104,10 @@ comparisons = estimates_long |>
 comparisons
 ggsave("comparisons.png", plot = comparisons, dpi = 600)
 ```
+
+```{r}
+estimates_long |>
+  group_by(Estimator) |>
+  summarize(Variance = var(Estimate))
+  
+```

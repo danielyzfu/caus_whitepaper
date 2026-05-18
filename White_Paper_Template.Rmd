@@ -13,6 +13,9 @@ header-includes:
   - \usepackage{soul}
   - \usepackage[skins,breakable]{tcolorbox}
   - \usepackage{placeins}
+  - \usepackage{setspace}
+  - \doublespacing
+
 ---
 
 ```{r setup, include=FALSE}
@@ -34,6 +37,27 @@ We ask whether adopting CUPED (Controlled-experiment Using Pre-Experiment Data) 
 ## [2] Make a Recommendation
 
 ## [3] Describe the CUPED Methodology
+
+CUPED (Controlled Experiments Using Pre-Experiment Data) is a variance-reduction methodology used in randomized experiments and A/B testing. CUPED utilizes data collected prior to experimentation to reduce variability in treatment effect estimates, allowing researchers to detect smaller effects or achieve similar statistical power with smaller sample sizes. Because of this, CUPED has proven to be an effective tool for causal analysis in industry since its inception at Microsoft,.
+
+CUPED seeks to reduce variability by introducing a control random variable that is both unaffected by the treatment and correlated with the experimental outcome variable. A commonly used metric that accomplishes this is pre-experimental data. For example, in an experiment where a team is seeking to understand the effect a new sports campaign has on equipment sales, prior spending data can be used as the control variable. Because $X_i$ is measured before treatment assignment, treatment cannot affect it, ensuring the adjustment does not introduce confounding bias. Additionally, pre-experimental data is generally correlated with future spending trends, which are often persistent behaviors for individuals.
+
+Formally, let $Y_i$ be the experimental outcome and $X_i$ be the pre-experiment metric. Then, CUPED constructs the adjusted estimator:
+$$
+Y_i^{CUPED} = Y_i - \theta X_i + \theta E[X_i] = Y_i - \theta (X_i - E[X_i])
+$$
+
+Then, we find the optimal $\theta$ such that:
+$$
+\theta^{*} = \frac{Cov(Y,X)}{Var(X)}
+$$
+
+This removes the component of the outcome's variability that can be predicted using the pre-treatment covariate. When substituting this into the variance for $Y_i^{CUPED}$, we get:
+$$
+Var(Y^{CUPED}) = (1-\rho^2)Var(Y)
+$$
+
+Hence, the more correlated $X_i$ and $Y_i$ are, the greater the variance reduction achieved by CUPED. CUPED is especially useful in large-scale experimentation settings where even small improvements in statistical precision can translate into substantial savings in experimentation costs or meaningful increases in revenue.
 
 ## [4] Compare CUPED to Other Methodologies
 
