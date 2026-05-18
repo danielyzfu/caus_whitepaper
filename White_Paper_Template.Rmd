@@ -7,37 +7,413 @@ output: pdf_document
 header-includes:
   - \usepackage{caption}
   - \usepackage{float}
-  - \usepackage[dvipsnames]{xcolor}
+  - \PassOptionsToPackage{dvipsnames}{xcolor}
   - \usepackage{amsmath}
   - \usepackage{enumitem}
   - \usepackage{soul}
   - \usepackage[skins,breakable]{tcolorbox}
+  - \usepackage{placeins}
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, fig.pos = "H", out.extra = "")
 ```
 
-# Executive Sumary
+# Executive Summary
 
 ---
 
 # White Paper
 
-## [1] Which Problem Are We Trying to Solve?
+## [1] State the Problem and Ask
 
-## [2] What is CUPED?
+Hulu is a subscription-based video streaming service that runs A/B tests to evaluate product changes such as recommendation algorithms, UI redesigns, and content curation strategies. All experiments are currently analyzed using difference-in-means (DM). The problem is that most product changes produce small lifts (1 to 3% relative to baseline), and user-level streaming behavior is highly variable, with weekly hours ranging from zero to 30+. The noise in the data regularly overwhelms the treatment signal, so experiments that produce real improvements often end up with confidence intervals that include zero. Kohavi and Thomke (2017) document that this is a common pattern across the industry: variance, not sample size or idea quality, is the binding constraint in most online experiments.
 
-## [3] What have other companies learned from their implementation of CUPED?
+We ask whether adopting CUPED (Controlled-experiment Using Pre-Experiment Data) can solve this problem. Our proof-of-concept simulation (Section 7) shows that it can: with Hulu's data characteristics, the naive DM estimator fails to detect a true 0.10 hrs/week treatment effect, while CUPED with a 2-week or longer pre-experiment window detects it.
 
-## [4] How does CUPED compare to other approaches for variance reduction?
+## [2] Make a Recommendation
 
-## [5] Which recommendations do we make?
+We recommend that Hulu adopt CUPED as the default analysis method for all A/B tests. The covariate should be pre-experiment weekly streaming hours (which Hulu already logs), with a default window of 4 weeks. For new users without history (about 20% of the experiment population), we follow Booking.com's COALESCE approach and leave their metrics unadjusted (Jackson, 2018). CUPED should be built into the analysis pipeline as a default rather than an opt-in tool, as Meta has done across hundreds of thousands of concurrent experiments (Meakin & Sangwan, 2024).
+
+Our simulation (Section 7) and industry benchmarks suggest 40 to 60% variance reduction for existing users. Booking.com reported reaching significance roughly twice as fast after adopting CUPED (Jackson, 2018). For Hulu, this translates to either detecting smaller effects at the same sample size, or reaching conclusions in half the time.
+
+## [3] Describe the CUPED Methodology
+
+## [4] Compare CUPED to Other Methodologies
+
+## [5] Report on CUPED Adoption Elsewhere
+
+## [6] Describe Implementation
+
+## [7] Report on a POC
+
+We simulate an A/B test on Hulu to illustrate how CUPED reduces estimator variance. The platform is testing a new recommendation algorithm, and the primary metric is weekly streaming hours per user. Full simulation code is provided in Appendix A.
+
+### Data Generating Process
+
+Each user $i$ has a stable baseline streaming rate $\mu_i \sim \text{LogNormal}(\log 7, 0.7)$, producing a right-skewed distribution with median around 7 hours per week. Weekly streaming hours are generated as:
+
+$$\text{hours}_{it} = \max\left(0,\; \mu_i + \tau \cdot W_i + \varepsilon_{it}\right)$$
+
+where $W_i \in \{0,1\}$ is the treatment indicator, $\tau = 0.10$ hours/week is the true treatment effect, and $\varepsilon_{it} \sim N(0, 5^2)$ is independent week-to-week noise. The floor at zero ensures non-negative hours. Light users with small $\mu_i$ naturally produce zero-hours weeks when noise pushes them below zero, and because the same users tend to be light across all weeks, these zeros are correlated across pre and post periods, preserving realistic pre-post correlation without any additional mechanism.
+
+We generate 50,000 users (80% existing, 20% new), 4 weeks of pre-experiment data, and 1 week of experiment data. New users have no pre-experiment observations.
+
+```{r poc-setup, include=FALSE}
+library(tidyverse)
+```
+
+```{r poc-generate, echo=FALSE}
+set.seed(42)
+
+N <- 50000
+new_user_frac <- 0.20
+log_mean <- log(7)
+log_sd <- 0.7
+noise_sd <- 5.0
+tau <- 0.10
+n_pre_weeks <- 4
+
+n_new <- round(N * new_user_frac)
+n_existing <- N - n_new
+
+users <- tibble(
+  user_id = 1:N,
+  is_new = c(rep(TRUE, n_new), rep(FALSE, n_existing)),
+  baseline_mu = rlnorm(N, meanlog = log_mean, sdlog = log_sd),
+  treatment = sample(c(0L, 1L), N, replace = TRUE)
+)
+
+generate_week <- function(baseline_mu, treatment_indicator = NULL, tau_val = 0) {
+  n <- length(baseline_mu)
+  noise <- rnorm(n, mean = 0, sd = noise_sd)
+  hours <- baseline_mu + noise
+  if (!is.null(treatment_indicator)) {
+    hours <- hours + tau_val * treatment_indicator
+  }
+  return(pmax(hours, 0))
+}
+
+pre_weeks <- map(1:n_pre_weeks, ~ generate_week(users$baseline_mu))
+names(pre_weeks) <- paste0("pre_week_", 1:n_pre_weeks)
+post_week <- generate_week(users$baseline_mu, users$treatment, tau)
+
+sim_data <- users %>%
+  bind_cols(as_tibble(pre_weeks)) %>%
+  mutate(
+    post_week = post_week,
+    pre_1wk = pre_week_4,
+    pre_2wk = (pre_week_3 + pre_week_4) / 2,
+    pre_4wk = (pre_week_1 + pre_week_2 + pre_week_3 + pre_week_4) / 4
+  ) %>%
+  mutate(
+    pre_1wk = if_else(is_new, NA_real_, pre_1wk),
+    pre_2wk = if_else(is_new, NA_real_, pre_2wk),
+    pre_4wk = if_else(is_new, NA_real_, pre_4wk)
+  )
+
+existing <- sim_data %>% filter(!is_new)
+
+cuped_adjust <- function(y, x) {
+  has_x <- !is.na(x)
+  theta <- cov(y[has_x], x[has_x]) / var(x[has_x])
+  x_mean <- mean(x[has_x])
+  y_adj <- y
+  y_adj[has_x] <- y[has_x] - theta * (x[has_x] - x_mean)
+  return(list(y_adj = y_adj, theta = theta))
+}
+
+run_test_all <- function(data, pre_col, label) {
+  y <- data$post_week
+  x <- data[[pre_col]]
+  w <- data$treatment
+  has_x <- !is.na(x)
+
+  y_t <- y[w == 1]; y_c <- y[w == 0]
+  n_t <- length(y_t); n_c <- length(y_c)
+
+  # Naive DM
+  naive_est <- mean(y_t) - mean(y_c)
+  naive_se <- sqrt(var(y_t) / n_t + var(y_c) / n_c)
+  naive_ci <- naive_est + c(-1, 1) * 1.96 * naive_se
+
+  # First Differences (theta = 1)
+  fd <- y; fd[has_x] <- y[has_x] - x[has_x]
+  fd_t <- fd[w == 1]; fd_c <- fd[w == 0]
+  fd_est <- mean(fd_t) - mean(fd_c)
+  fd_se <- sqrt(var(fd_t) / n_t + var(fd_c) / n_c)
+  fd_ci <- fd_est + c(-1, 1) * 1.96 * fd_se
+
+  # CUPED (optimal theta)
+  res <- cuped_adjust(y, x)
+  ya <- res$y_adj
+  ya_t <- ya[w == 1]; ya_c <- ya[w == 0]
+  cuped_est <- mean(ya_t) - mean(ya_c)
+  cuped_se <- sqrt(var(ya_t) / n_t + var(ya_c) / n_c)
+  cuped_ci <- cuped_est + c(-1, 1) * 1.96 * cuped_se
+
+  # OLS Regression Adjustment
+  df_ols <- tibble(y = y, w = w, x = x) %>% filter(!is.na(x))
+  mod <- lm(y ~ w + x, data = df_ols)
+  ols_est <- coef(mod)["w"]
+  ols_se <- summary(mod)$coefficients["w", "Std. Error"]
+  ols_ci <- ols_est + c(-1, 1) * 1.96 * ols_se
+
+  sig <- function(ci) ifelse((ci[1] > 0) | (ci[2] < 0), "Yes", "No")
+
+  tibble(
+    Window = label,
+    Method = c("Naive DM", "First Diff.", "CUPED", "OLS Reg. Adj."),
+    Estimate = round(c(naive_est, fd_est, cuped_est, ols_est), 4),
+    SE = round(c(naive_se, fd_se, cuped_se, ols_se), 4),
+    `95% CI` = c(sprintf("[%.4f, %.4f]", naive_ci[1], naive_ci[2]),
+                 sprintf("[%.4f, %.4f]", fd_ci[1], fd_ci[2]),
+                 sprintf("[%.4f, %.4f]", cuped_ci[1], cuped_ci[2]),
+                 sprintf("[%.4f, %.4f]", ols_ci[1], ols_ci[2])),
+    Sig. = c(sig(naive_ci), sig(fd_ci), sig(cuped_ci), sig(ols_ci)),
+    `Var. Red.` = sprintf("%.1f%%", c(0,
+                   (1 - fd_se^2 / naive_se^2) * 100,
+                   (1 - cuped_se^2 / naive_se^2) * 100,
+                   (1 - ols_se^2 / naive_se^2) * 100))
+  )
+}
+```
+
+### Pre-Post Correlation and Method Comparison
+
+```{r poc-compute, echo=FALSE}
+rho_1 <- cor(existing$pre_1wk, existing$post_week)
+rho_2 <- cor(existing$pre_2wk, existing$post_week)
+rho_4 <- cor(existing$pre_4wk, existing$post_week)
+
+all_results <- bind_rows(
+  run_test_all(existing, "pre_1wk", "1-week"),
+  run_test_all(existing, "pre_2wk", "2-week"),
+  run_test_all(existing, "pre_4wk", "4-week")
+)
+
+# all users, 4-week CUPED
+res_all <- run_test_all(sim_data, "pre_4wk", "4-week")
+cuped_all_vr <- res_all %>% filter(Method == "CUPED") %>% pull(`Var. Red.`)
+
+# new users naive
+new_users <- sim_data %>% filter(is_new)
+y_t <- new_users$post_week[new_users$treatment == 1]
+y_c <- new_users$post_week[new_users$treatment == 0]
+new_se <- round(sqrt(var(y_t) / length(y_t) + var(y_c) / length(y_c)), 4)
+ex_naive_se <- round(res_all %>% filter(Method == "Naive DM") %>% pull(SE), 4)
+
+cuped_vr_1 <- all_results %>% filter(Method == "CUPED", Window == "1-week") %>% pull(`Var. Red.`)
+cuped_vr_4 <- all_results %>% filter(Method == "CUPED", Window == "4-week") %>% pull(`Var. Red.`)
+fd_vr_1 <- all_results %>% filter(Method == "First Diff.", Window == "1-week") %>% pull(`Var. Red.`)
+fd_vr_4 <- all_results %>% filter(Method == "First Diff.", Window == "4-week") %>% pull(`Var. Red.`)
+```
+
+The pre-post correlation for existing users increases from `r round(rho_1, 3)` (1-week window) to `r round(rho_2, 3)` (2 weeks) and `r round(rho_4, 3)` (4 weeks), because averaging over more weeks smooths out noise and yields a more stable estimate of each user's baseline. The improvement from 1 to 2 weeks is larger than from 2 to 4 weeks, consistent with diminishing returns reported by Faire (Ritchie & Wong, 2021). Since CUPED's theoretical variance reduction equals $\rho^2$, these correlations imply that extending the covariate window from 1 to 4 weeks raises variance reduction from roughly `r round(rho_1^2 * 100)`% to `r round(rho_4^2 * 100)`%.
+
+We compare four estimators: naive difference-in-means, first differences ($Y_{post} - X_{pre}$, equivalent to CUPED with $\theta$ forced to 1), CUPED (data-driven optimal $\hat{\theta}$), and OLS regression adjustment. For new users with missing pre-experiment data, we apply the Booking.com COALESCE approach and leave their outcome unadjusted (Jackson, 2018). Full numerical results are reported in Appendix B (Tables B1 and B2).
+
+### Results
+
+CUPED and OLS regression adjustment produce identical point estimates, standard errors, and confidence intervals across all window lengths. This follows from the fact that the two methods are mathematically equivalent when a single covariate is used: CUPED's $\hat{\theta} = \text{Cov}(Y, X)/\text{Var}(X)$ is the OLS slope on $X$, so the adjusted outcomes are the same.
+
+First differences performs slightly worse than CUPED because it fixes $\theta = 1$, while the data-driven $\hat{\theta}$ ranges from about 0.69 (1-week) to 0.90 (4-week). The gap is largest at short windows: `r fd_vr_1` variance reduction for first differences versus `r cuped_vr_1` for CUPED at 1 week. As the window lengthens and $\hat{\theta}$ approaches 1, the two methods converge (`r fd_vr_4` versus `r cuped_vr_4` at 4 weeks).
+
+Naive DM fails to detect the 0.10 hrs/week treatment effect at any window length --- its confidence interval always includes zero. CUPED and first differences both reach significance at the 2-week and 4-week windows. When new users (20% of the sample) are included via the COALESCE approach, CUPED with a 4-week window still achieves `r cuped_all_vr` variance reduction at the population level, compared to `r cuped_vr_4` for existing users alone. New users in isolation have a standard error of `r new_se`, roughly twice that of the full sample (`r ex_naive_se`), confirming the Netflix finding that CUPED provides no benefit for users without historical data (Xie & Aurisset, 2016).
+
+\FloatBarrier
+
+```{r poc-ci-plot, echo=FALSE, fig.width=5.5, fig.height=3.5, fig.align="center"}
+plot_data <- all_results %>%
+  mutate(
+    CI_lo = as.numeric(str_extract(`95% CI`, "(?<=\\[)[\\d.-]+")),
+    CI_hi = as.numeric(str_extract(`95% CI`, "(?<=, )[\\d.-]+(?=\\])"))
+  ) %>%
+  rename(Est = Estimate)
+
+plot_data$Window <- factor(plot_data$Window, levels = c("1-week", "2-week", "4-week"))
+plot_data$Method <- factor(plot_data$Method, levels = c("Naive DM", "First Diff.", "CUPED", "OLS Reg. Adj."))
+
+ggplot(plot_data, aes(x = Window, y = Est, color = Method)) +
+  geom_pointrange(aes(ymin = CI_lo, ymax = CI_hi),
+                  position = position_dodge(width = 0.5), size = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = tau, linetype = "dotted", color = "red", alpha = 0.6) +
+  annotate("text", x = 2.8, y = tau + 0.02, label = sprintf("True tau = %.2f", tau),
+           color = "red", size = 2.5) +
+  scale_color_manual(values = c("Naive DM" = "gray50", "First Diff." = "orange3",
+                                "CUPED" = "steelblue", "OLS Reg. Adj." = "darkgreen")) +
+  labs(y = "Estimated Treatment Effect (hrs/week)",
+       x = "Pre-Experiment Window Length") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+*Figure 1: 95% confidence intervals by method and window length (existing users). Dashed gray line: zero. Dotted red line: true effect. CUPED and OLS overlap exactly.*
 
 ---
 
 # Appendix
 
-## [A.1] FAQs
+## [A] Simulation Code
 
-## [A.2] Additional Tables and Figures
+```{r appendix-code, eval=FALSE}
+library(tidyverse)
+set.seed(42)
+
+# --- Parameters ---
+N <- 50000
+new_user_frac <- 0.20
+log_mean <- log(7)
+log_sd <- 0.7
+noise_sd <- 5.0
+tau <- 0.10
+n_pre_weeks <- 4
+
+# --- Generate Users ---
+n_new <- round(N * new_user_frac)
+n_existing <- N - n_new
+
+users <- tibble(
+  user_id = 1:N,
+  is_new = c(rep(TRUE, n_new), rep(FALSE, n_existing)),
+  baseline_mu = rlnorm(N, meanlog = log_mean, sdlog = log_sd),
+  treatment = sample(c(0L, 1L), N, replace = TRUE)
+)
+
+# --- Generate Weekly Streaming Hours ---
+generate_week <- function(baseline_mu, treatment_indicator = NULL, tau_val = 0) {
+  n <- length(baseline_mu)
+  noise <- rnorm(n, mean = 0, sd = noise_sd)
+  hours <- baseline_mu + noise
+  if (!is.null(treatment_indicator)) {
+    hours <- hours + tau_val * treatment_indicator
+  }
+  return(pmax(hours, 0))
+}
+
+pre_weeks <- map(1:n_pre_weeks, ~ generate_week(users$baseline_mu))
+names(pre_weeks) <- paste0("pre_week_", 1:n_pre_weeks)
+post_week <- generate_week(users$baseline_mu, users$treatment, tau)
+
+# --- Assemble Dataset ---
+sim_data <- users %>%
+  bind_cols(as_tibble(pre_weeks)) %>%
+  mutate(
+    post_week = post_week,
+    pre_1wk = pre_week_4,
+    pre_2wk = (pre_week_3 + pre_week_4) / 2,
+    pre_4wk = (pre_week_1 + pre_week_2 + pre_week_3 + pre_week_4) / 4
+  ) %>%
+  mutate(
+    pre_1wk = if_else(is_new, NA_real_, pre_1wk),
+    pre_2wk = if_else(is_new, NA_real_, pre_2wk),
+    pre_4wk = if_else(is_new, NA_real_, pre_4wk)
+  )
+
+# --- CUPED Adjustment (Booking.com COALESCE for missing data) ---
+cuped_adjust <- function(y, x) {
+  has_x <- !is.na(x)
+  theta <- cov(y[has_x], x[has_x]) / var(x[has_x])
+  x_mean <- mean(x[has_x])
+  y_adj <- y
+  y_adj[has_x] <- y[has_x] - theta * (x[has_x] - x_mean)
+  return(list(y_adj = y_adj, theta = theta))
+}
+
+# --- Four-Method Comparison ---
+run_test_all <- function(data, pre_col, label) {
+  y <- data$post_week
+  x <- data[[pre_col]]
+  w <- data$treatment
+  has_x <- !is.na(x)
+
+  y_t <- y[w == 1]; y_c <- y[w == 0]
+  n_t <- length(y_t); n_c <- length(y_c)
+
+  # Naive DM
+  naive_est <- mean(y_t) - mean(y_c)
+  naive_se <- sqrt(var(y_t) / n_t + var(y_c) / n_c)
+
+  # First Differences (theta = 1)
+  fd <- y; fd[has_x] <- y[has_x] - x[has_x]
+  fd_t <- fd[w == 1]; fd_c <- fd[w == 0]
+  fd_est <- mean(fd_t) - mean(fd_c)
+  fd_se <- sqrt(var(fd_t) / n_t + var(fd_c) / n_c)
+
+  # CUPED (optimal theta)
+  res <- cuped_adjust(y, x)
+  ya <- res$y_adj
+  ya_t <- ya[w == 1]; ya_c <- ya[w == 0]
+  cuped_est <- mean(ya_t) - mean(ya_c)
+  cuped_se <- sqrt(var(ya_t) / n_t + var(ya_c) / n_c)
+
+  # OLS Regression Adjustment
+  df_ols <- tibble(y = y, w = w, x = x) %>% filter(!is.na(x))
+  mod <- lm(y ~ w + x, data = df_ols)
+  ols_est <- coef(mod)["w"]
+  ols_se <- summary(mod)$coefficients["w", "Std. Error"]
+
+  cat(sprintf("[%s]\n", label))
+  cat(sprintf("  Naive DM:     est=%.4f SE=%.4f VR=  0.0%%\n", naive_est, naive_se))
+  cat(sprintf("  First Diff:   est=%.4f SE=%.4f VR=%5.1f%%\n",
+              fd_est, fd_se, (1 - fd_se^2/naive_se^2)*100))
+  cat(sprintf("  CUPED:        est=%.4f SE=%.4f VR=%5.1f%%\n",
+              cuped_est, cuped_se, (1 - cuped_se^2/naive_se^2)*100))
+  cat(sprintf("  OLS Reg Adj:  est=%.4f SE=%.4f VR=%5.1f%%\n\n",
+              ols_est, ols_se, (1 - ols_se^2/naive_se^2)*100))
+}
+
+existing <- sim_data %>% filter(!is_new)
+run_test_all(existing, "pre_1wk", "Existing, 1-week")
+run_test_all(existing, "pre_2wk", "Existing, 2-week")
+run_test_all(existing, "pre_4wk", "Existing, 4-week")
+run_test_all(sim_data, "pre_1wk", "All users, 1-week")
+run_test_all(sim_data, "pre_4wk", "All users, 4-week")
+```
+
+## [B] Detailed Simulation Results
+
+```{r appendix-tables, echo=FALSE}
+# Recompute (these chunks run independently of Section 7 chunks)
+existing_app <- sim_data %>% filter(!is_new)
+
+all_results_app <- bind_rows(
+  run_test_all(existing_app, "pre_1wk", "1-week"),
+  run_test_all(existing_app, "pre_2wk", "2-week"),
+  run_test_all(existing_app, "pre_4wk", "4-week")
+)
+
+rho_1_app <- cor(existing_app$pre_1wk, existing_app$post_week)
+rho_2_app <- cor(existing_app$pre_2wk, existing_app$post_week)
+rho_4_app <- cor(existing_app$pre_4wk, existing_app$post_week)
+
+# Table B0: Pre-post correlation
+tibble(
+  `Pre-Experiment Window` = c("1 week", "2 weeks", "4 weeks"),
+  `Correlation (rho)` = round(c(rho_1_app, rho_2_app, rho_4_app), 3),
+  `Theoretical VR` = paste0(round(c(rho_1_app, rho_2_app, rho_4_app)^2 * 100, 1), "%")
+) %>% knitr::kable(caption = "Table B0: Pre-post correlation and theoretical variance reduction by window length (existing users).")
+
+# Table B1: SE and Variance Reduction
+all_results_app %>%
+  select(Window, Method, SE, `Var. Red.`) %>%
+  pivot_wider(names_from = Method, values_from = c(SE, `Var. Red.`)) %>%
+  select(Window,
+         `Naive SE` = `SE_Naive DM`,
+         `FD SE` = `SE_First Diff.`,
+         `CUPED SE` = `SE_CUPED`,
+         `OLS SE` = `SE_OLS Reg. Adj.`,
+         `FD VR` = `Var. Red._First Diff.`,
+         `CUPED VR` = `Var. Red._CUPED`,
+         `OLS VR` = `Var. Red._OLS Reg. Adj.`) %>%
+  knitr::kable(caption = "Table B1: Standard errors and variance reduction by method (existing users, true tau = 0.10).")
+
+# Table B2: Estimates and CIs
+all_results_app %>%
+  filter(Method != "OLS Reg. Adj.") %>%
+  mutate(Result = sprintf("%.3f %s %s", Estimate, `95% CI`, ifelse(Sig. == "Yes", "*", ""))) %>%
+  select(Window, Method, Result) %>%
+  pivot_wider(names_from = Method, values_from = Result) %>%
+  knitr::kable(caption = "Table B2: Estimates and 95% CIs (existing users). * = significant at 5%. OLS identical to CUPED, omitted.")
+```
